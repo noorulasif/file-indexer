@@ -1,0 +1,16 @@
+# Ignore virtual environment
+venv/
+venv/*
+__pycache__/
+
+# Ignore models directory
+models/
+models/*
+
+# Also common to ignore these
+.env
+*.pyc
+*.pyo
+*.pyd
+.Python
+

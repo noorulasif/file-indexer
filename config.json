@@ -1,0 +1,26 @@
+{
+  "watched_folders": [
+    "~/Documents",
+    "~/Downloads"
+  ],
+  "file_extensions": [
+    ".txt",
+    ".md",
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".csv",
+    ".jpg",
+    ".jpeg",
+    ".png"
+  ],
+  "model_path": "models/phi-4-mini-q4.gguf",
+  "vision_model_path": "models/qwen2.5-vl-3b-q4.gguf",
+  "database_path": "file_index.db",
+  "use_gpu": false,
+  "gpu_layers": 0,
+  "max_file_size_mb": 50,
+  "indexer_threads": 1
+}
+
+
