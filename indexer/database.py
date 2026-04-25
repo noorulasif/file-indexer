@@ -551,6 +551,31 @@ class FileDatabase:
         with self._get_connection() as conn:
             conn.execute("INSERT INTO files_fts(files_fts) VALUES('optimize')")
 
+# Add this method to the FileDatabase class in database.py
+
+    def clear_all(self) -> int:
+        """
+        Clear ALL records from the database.
+        Useful for full reindexing operations.
+    
+        Returns:
+            Number of records deleted
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+        
+            # Get count before deletion
+            cursor.execute("SELECT COUNT(*) as count FROM indexed_files")
+            count = cursor.fetchone()["count"]
+        
+            # Delete all records (FTS will be updated via triggers)
+            cursor.execute("DELETE FROM indexed_files")
+        
+            # Vacuum to reclaim space
+            conn.execute("VACUUM")
+        
+            logger.info(f"Cleared {count} records from database")
+            return count
 
 def main():
     """Test the database module with sample operations."""

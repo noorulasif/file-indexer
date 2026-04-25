@@ -379,6 +379,199 @@ def main():
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
 
+# Add these methods to the FileIndexerOrchestrator class in orchestrator.py
+
+    def cleanup_missing_files(self) -> int:
+        """
+        Remove database records for files that no longer exist on disk.
+    
+        Returns:
+            Number of records deleted
+        """
+        logger.info("Starting cleanup of missing files...")
+    
+        try:
+            # Get current count before cleanup
+            stats_before = self.db.get_all_stats()
+            total_before = stats_before['total_files']
+            logger.info(f"Total files in database before cleanup: {total_before}")
+            
+            # Delete missing files
+            deleted_count = self.db.delete_missing_files()
+        
+            # Get count after cleanup
+            stats_after = self.db.get_all_stats()
+            total_after = stats_after['total_files']
+        
+            logger.info(f"Cleanup complete: {deleted_count} records deleted")
+            logger.info(f"Database now contains {total_after} files (was {total_before})")
+            
+            # Show notification if running with tray
+            if hasattr(self, 'show_notification'):
+                self.show_notification(
+                    "File Indexer Cleanup",
+                    f"Removed {deleted_count} missing files\nDatabase: {total_after} files"
+                )
+        
+            return deleted_count
+        
+        except Exception as e:
+            logger.error(f"Cleanup failed: {e}", exc_info=True)
+            raise
+
+    def reindex_all(self) -> int:
+        """
+        Clear all records and re-index all existing files from scratch.
+        Useful when updating models or fixing database issues.
+    
+        Returns:
+            Number of files reindexed
+        """
+        logger.info("=" * 60)
+        logger.info("STARTING FULL REINDEX")
+        logger.info("=" * 60)
+    
+        try:
+            # Get count before clearing
+            stats_before = self.db.get_all_stats()
+            total_before = stats_before['total_files']
+            logger.info(f"Files in database before reindex: {total_before}")
+        
+            # Confirm with user if running interactively
+            if not hasattr(self, 'skip_confirmation'):
+                response = input(f"\nThis will delete {total_before} records and re-index all files. Continue? (y/N): ")
+                if response.lower() != 'y':
+                    logger.info("Reindex cancelled by user")
+                    return 0
+        
+            # Clear the database
+            logger.info("Clearing database...")
+            deleted_count = self.db.clear_all()
+            logger.info(f"Cleared {deleted_count} records from database")
+        
+            # Reset orchestrator stats
+            self.stats = {
+                "processed": 0,
+                "skipped": 0,
+                "failed": 0,
+                "changed": 0
+            }
+        
+            # Run full index of existing files
+            logger.info("Starting fresh index of all files...")
+            self.index_existing_files()
+        
+            # Get final stats
+            stats_after = self.db.get_all_stats()
+            total_after = stats_after['total_files']
+        
+            logger.info("=" * 60)
+            logger.info(f"REINDEX COMPLETE: {total_after} files indexed")
+            logger.info(f"Session stats: {self.stats['processed']} processed, "
+                       f"{self.stats['failed']} failed")
+            logger.info("=" * 60)
+        
+            # Show notification if running with tray
+            if hasattr(self, 'show_notification'):
+                self.show_notification(
+                    "File Indexer Reindex Complete",
+                    f"Reindexed {total_after} files\n"
+                    f"Failed: {self.stats['failed']}"
+                )
+        
+            return total_after
+        
+        except Exception as e:
+            logger.error(f"Reindex failed: {e}", exc_info=True)
+            raise
+
+    def reindex_file(self, file_path: str) -> bool:
+        """
+        Force re-index a single file regardless of hash.
+        Useful when updating models or fixing metadata.
+    
+        Args:
+            file_path: Path to the file to reindex
+        
+        Returns:
+            True if successfully reindexed, False otherwise
+        """
+        logger.info(f"Forcing reindex of file: {file_path}")
+    
+        # Check if file exists
+        if not Path(file_path).exists():
+            logger.error(f"File does not exist: {file_path}")
+            return False
+    
+        # Remove existing record from database
+        try:
+            # Delete the record first
+            with self.db._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM indexed_files WHERE file_path = ?", (file_path,))
+                deleted = cursor.rowcount
+        
+            if deleted > 0:
+                logger.debug(f"Removed existing record for {file_path}")
+            else:
+                logger.debug(f"No existing record found for {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to remove existing record: {e}")
+            # Continue anyway - process_file will handle upsert
+    
+        # Process the file
+        success = self.process_file(file_path)
+    
+        if success:
+            logger.info(f"Successfully reindexed: {file_path}")
+        else:
+            logger.error(f"Failed to reindex: {file_path}")
+    
+        return success
+
+    def get_detailed_stats(self) -> dict:
+        """
+        Get detailed statistics including database info and system status.
+    
+        Returns:
+            Dictionary with comprehensive statistics
+        """
+        db_stats = self.db.get_all_stats()
+    
+        # Get extension breakdown
+        extensions = {}
+        with self.db._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT extension, COUNT(*) as count 
+                FROM indexed_files 
+                WHERE extension IS NOT NULL
+                GROUP BY extension 
+                ORDER BY count DESC
+            """)
+            extensions = {row["extension"]: row["count"] for row in cursor.fetchall()}
+    
+        # Get recent activity
+        recent = self.db.get_recent_files(limit=5)
+    
+        return {
+            "database": db_stats,
+            "extensions": extensions,
+            "recent_files": recent,
+            "orchestrator": {
+                "is_running": self.is_running,
+                "is_paused": hasattr(self, 'is_paused') and self.is_paused,
+                "session_stats": self.stats.copy(),
+                "watcher_active": self.watcher is not None and self.watcher.is_watching if self.watcher else False
+            },
+            "model": self.tagger.get_model_info() if self.tagger else {},
+            "config": {
+                "watched_folders": len(self.config.get('watched_folders', [])),
+                "file_extensions": len(self.config.get('file_extensions', [])),
+                "max_file_size_mb": self.config.get('max_file_size_mb', 50),
+                "use_gpu": self.config.get('use_gpu', False)
+            }
+        }
 
 if __name__ == "__main__":
     main()
