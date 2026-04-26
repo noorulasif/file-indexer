@@ -51,10 +51,11 @@ class FileIndexerOrchestrator:
         self.tagger = LLMTagger(
             model_path=self.config['model_path'],
             vision_model_path=self.config.get('vision_model_path'),
+            vision_projector_path=self.config.get('vision_projector_path'),  # NEW
             use_gpu=self.config.get('use_gpu', False),
             gpu_layers=self.config.get('gpu_layers', 0)
-        )
-        
+        )        
+
         # Check if tagger loaded successfully
         if not self.tagger.is_loaded():
             logger.warning("Text model not loaded! Some features may not work.")

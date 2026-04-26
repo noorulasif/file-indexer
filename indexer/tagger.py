@@ -48,28 +48,31 @@ class LLMTagger:
         self, 
         model_path: str, 
         vision_model_path: Optional[str] = None,
+        vision_projector_path: Optional[str] = None,  # NEW: projector file
         use_gpu: bool = False, 
         gpu_layers: int = 0
     ):
         """
         Initialize the LLM tagger.
-        
+    
         Args:
             model_path: Path to the text .gguf model file
             vision_model_path: Optional path to vision .gguf model file
+            vision_projector_path: Optional path to vision projector file (mmproj)
             use_gpu: Whether to use GPU acceleration
             gpu_layers: Number of layers to offload to GPU (0 = CPU only)
         """
         self.model_path = Path(model_path)
         self.vision_model_path = Path(vision_model_path) if vision_model_path else None
+        self.vision_projector_path = Path(vision_projector_path) if vision_projector_path else None
         self.use_gpu = use_gpu
         self.gpu_layers = gpu_layers if use_gpu else 0
         self.model = None
         self.vision_model = None
-        
+    
         # Load models
         self._load_model()
-        if self.vision_model_path:
+        if self.vision_model_path and self.vision_projector_path:
             self._load_vision_model()
     
     def _load_model(self) -> None:
@@ -110,18 +113,24 @@ class LLMTagger:
         if Llama is None:
             logger.error("llama-cpp-python is not installed, cannot load vision model")
             return
-        
+    
         if not self.vision_model_path or not self.vision_model_path.exists():
             logger.error(f"Vision model file not found: {self.vision_model_path}")
             return
-        
+    
+        if not self.vision_projector_path or not self.vision_projector_path.exists():
+            logger.error(f"Vision projector file not found: {self.vision_projector_path}")
+            return
+    
         try:
             logger.info(f"Loading vision model from {self.vision_model_path}")
+            logger.info(f"Loading vision projector from {self.vision_projector_path}")
             logger.info(f"GPU: {self.use_gpu}, Layers: {self.gpu_layers}")
-            
-            # Vision models need a chat format for multimodal input
+        
+            # Vision models need both the model and projector files
             self.vision_model = Llama(
                 model_path=str(self.vision_model_path),
+                projector_path=str(self.vision_projector_path),  # NEW: projector file
                 n_ctx=2048,
                 n_threads=4,
                 n_gpu_layers=self.gpu_layers,
@@ -132,7 +141,7 @@ class LLMTagger:
                 chat_format="llava-1.5",  # Common format for vision models
             )
             logger.info("Vision model loaded successfully")
-            
+        
         except Exception as e:
             logger.error(f"Failed to load vision model: {e}")
             self.vision_model = None

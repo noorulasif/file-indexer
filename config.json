@@ -14,13 +14,13 @@
     ".jpeg",
     ".png"
   ],
-  "model_path": "models/phi-4-mini-q4.gguf",
-  "vision_model_path": "models/qwen2.5-vl-3b-q4.gguf",
+  "model_path": "models/Phi-4-mini-instruct-Q4_K_M.gguf",
+  "vision_model_path": "models/ggml-model-Q4_K_M.gguf",
+  "vision_projector_path": "models/mmproj-model-f16.gguf",
   "database_path": "file_index.db",
   "use_gpu": false,
   "gpu_layers": 0,
   "max_file_size_mb": 50,
   "indexer_threads": 1
 }
-
 
