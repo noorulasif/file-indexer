@@ -3,17 +3,21 @@ LLM Tagger module for the File Indexer.
 Uses llama-cpp-python to generate metadata from text and image files.
 """
 
+import base64
+import io
 import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 # Try to import llama-cpp-python
 try:
     from llama_cpp import Llama
+    from llama_cpp.llama_chat_format import Llava15ChatHandler
 except ImportError:
     Llama = None
+    Llava15ChatHandler = None
     print("Warning: llama-cpp-python not installed. Install with: pip install llama-cpp-python")
 
 # Try to import PIL for image processing
@@ -48,7 +52,7 @@ class LLMTagger:
         self, 
         model_path: str, 
         vision_model_path: Optional[str] = None,
-        vision_projector_path: Optional[str] = None,  # NEW: projector file
+        vision_projector_path: Optional[str] = None,
         use_gpu: bool = False, 
         gpu_layers: int = 0
     ):
@@ -93,12 +97,12 @@ class LLMTagger:
             
             self.model = Llama(
                 model_path=str(self.model_path),
-                n_ctx=2048,  # Context window size
-                n_threads=4,  # Number of CPU threads
+                n_ctx=2048,
+                n_threads=4,
                 n_gpu_layers=self.gpu_layers,
-                verbose=False,  # Reduce console output
-                use_mlock=False,  # Avoid memory locking issues
-                use_mmap=True,  # Memory map the model for faster loading
+                verbose=False,
+                use_mlock=False,
+                use_mmap=True,
             )
             logger.info("Text model loaded successfully")
             
@@ -109,8 +113,9 @@ class LLMTagger:
     def _load_vision_model(self) -> None:
         """
         Load the vision-language model for image understanding.
+        Uses Llava15ChatHandler with a CLIP projector file.
         """
-        if Llama is None:
+        if Llama is None or Llava15ChatHandler is None:
             logger.error("llama-cpp-python is not installed, cannot load vision model")
             return
     
@@ -126,19 +131,19 @@ class LLMTagger:
             logger.info(f"Loading vision model from {self.vision_model_path}")
             logger.info(f"Loading vision projector from {self.vision_projector_path}")
             logger.info(f"GPU: {self.use_gpu}, Layers: {self.gpu_layers}")
-        
-            # Vision models need both the model and projector files
+
+            # FIX #3: Use Llava15ChatHandler with clip_model_path — not projector_path or chat_format
+            chat_handler = Llava15ChatHandler(
+                clip_model_path=str(self.vision_projector_path)
+            )
             self.vision_model = Llama(
                 model_path=str(self.vision_model_path),
-                projector_path=str(self.vision_projector_path),  # NEW: projector file
+                chat_handler=chat_handler,
                 n_ctx=2048,
                 n_threads=4,
                 n_gpu_layers=self.gpu_layers,
                 verbose=False,
-                use_mlock=False,
-                use_mmap=True,
-                # Vision-specific settings
-                chat_format="llava-1.5",  # Common format for vision models
+                logits_all=True,  # Required for LLaVA to work
             )
             logger.info("Vision model loaded successfully")
         
@@ -270,12 +275,12 @@ JSON:"""
         
         # Remove markdown code blocks if present
         if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]  # Remove ```json
+            cleaned = cleaned[7:]
         elif cleaned.startswith("```"):
-            cleaned = cleaned[3:]  # Remove ```
+            cleaned = cleaned[3:]
         
         if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]  # Remove closing ```
+            cleaned = cleaned[:-3]
         
         cleaned = cleaned.strip()
         
@@ -372,12 +377,13 @@ JSON:"""
             # Generate response from LLM
             logger.info(f"Tagging text file: {Path(file_path).name}")
             
+            # FIX #1: Removed "}" from stop tokens — it was cutting off JSON mid-object
             response = self.model(
                 prompt=prompt,
-                max_tokens=512,  # Enough for JSON output
-                temperature=0.1,  # Low temperature for consistent output
+                max_tokens=512,
+                temperature=0.1,
                 top_p=0.95,
-                stop=["```", "}"],  # Stop tokens - we'll add back the closing brace
+                stop=["```"],
                 echo=False,
                 frequency_penalty=0.0,
                 presence_penalty=0.0
@@ -386,9 +392,8 @@ JSON:"""
             # Extract the generated text
             generated_text = response['choices'][0]['text'].strip()
             
-            # Add back closing brace if it was cut off
+            # Add back closing brace if it was cut off by max_tokens
             if generated_text and not generated_text.endswith('}'):
-                # Count opening braces
                 open_braces = generated_text.count('{')
                 close_braces = generated_text.count('}')
                 if open_braces > close_braces:
@@ -460,42 +465,42 @@ JSON:"""
                 
                 # Resize to max 512x512 while maintaining aspect ratio
                 img.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                
-                # Save to temporary file or bytes for the model
-                # llama-cpp-python expects a file path for vision models
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
-                    img.save(tmp_file, 'JPEG', quality=85)
-                    tmp_path = tmp_file.name
+
+                # FIX #4: Encode image to base64 data URI in memory — no temp file needed
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=85)
+                b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                data_uri = f"data:image/jpeg;base64,{b64}"
             
             # Build prompt for vision model
             prompt = self._build_vision_prompt(file_path)
             
-            # Use the vision model with image
-            # Vision models use the create_chat_completion method with images
+            # FIX #1 (vision): Removed "}" from stop tokens
+            # FIX #4: Pass image as base64 data URI, not file:// path
             response = self.vision_model.create_chat_completion(
                 messages=[
                     {
+                        "role": "system",
+                        "content": "You are a document metadata generator. Analyze the image and return only valid JSON."
+                    },
+                    {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"file://{tmp_path}"}}
+                            {"type": "image_url", "image_url": {"url": data_uri}},
+                            {"type": "text", "text": prompt}
                         ]
                     }
                 ],
                 max_tokens=512,
                 temperature=0.1,
                 top_p=0.95,
-                stop=["```", "}"],
+                stop=["```"],
             )
-            
-            # Clean up temporary file
-            Path(tmp_path).unlink()
             
             # Extract the generated text
             generated_text = response['choices'][0]['message']['content'].strip()
             
-            # Add back closing brace if it was cut off
+            # Add back closing brace if it was cut off by max_tokens
             if generated_text and not generated_text.endswith('}'):
                 open_braces = generated_text.count('{')
                 close_braces = generated_text.count('}')
@@ -552,7 +557,8 @@ def main():
     
     parser = argparse.ArgumentParser(description="Test LLM tagger for text and images")
     parser.add_argument("model_path", help="Path to text GGUF model file")
-    parser.add_argument("--vision-model", "-v", help="Path to vision GGUF model file (for images)")
+    parser.add_argument("--vision-model", "-vm", help="Path to vision GGUF model file (for images)")
+    parser.add_argument("--projector", "-p", help="Path to vision projector (mmproj) file")
     parser.add_argument("--file", "-f", help="Path to file to tag (text or image)")
     parser.add_argument("--text", "-t", help="Direct text to tag (optional)")
     parser.add_argument("--image", "-i", help="Path to image file to tag")
@@ -571,7 +577,6 @@ def main():
     file_path = None
     
     if args.image:
-        # Tag an image file
         is_image = True
         file_path = args.image
         if not Path(file_path).exists():
@@ -580,26 +585,22 @@ def main():
         print(f"Processing image: {file_path}")
         
     elif args.file:
-        # Tag a file (could be text or image)
         file_path = args.file
         ext = Path(file_path).suffix.lower()
         if ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
             is_image = True
             print(f"Processing image: {file_path}")
         else:
-            # Read text file
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             print(f"Loaded text file: {file_path}")
             
     elif args.text:
-        # Use direct text
         content = args.text
         file_path = "direct_input.txt"
         print("Using direct text input...")
         
     else:
-        # Use sample text
         sample_text = """
         INVOICE
         Date: 2024-03-15
@@ -617,15 +618,17 @@ def main():
         file_path = "sample_invoice.txt"
         print("Using sample invoice text...")
     
-    # Initialize tagger
     print(f"\nLoading text model from: {args.model_path}")
     if args.vision_model:
         print(f"Loading vision model from: {args.vision_model}")
+        if args.projector:
+            print(f"Loading projector from: {args.projector}")
     print(f"GPU: {args.gpu}, GPU Layers: {args.gpu_layers}")
     
     tagger = LLMTagger(
         model_path=args.model_path,
         vision_model_path=args.vision_model,
+        vision_projector_path=args.projector,
         use_gpu=args.gpu,
         gpu_layers=args.gpu_layers
     )
@@ -643,29 +646,25 @@ def main():
     print("TAGGING FILE...")
     print("=" * 60)
     
-    # Tag the content
     if is_image:
         result = tagger.tag_image_file(file_path)
     else:
         result = tagger.tag_text_file(file_path, content)
     
-    # Display results
     print("\n📋 METADATA RESULTS:")
     print("-" * 60)
     print(f"Summary: {result['summary']}")
     print(f"Document Type: {result['document_type']}")
     print(f"Tags: {', '.join(result['tags'])}")
-    print(f"Keywords: {', '.join(result['keywords'][:10])}")  # Show first 10
+    print(f"Keywords: {', '.join(result['keywords'][:10])}")
     print(f"Date Hint: {result['date_hint']}")
     print(f"People Mentioned: {', '.join(result['people_mentioned']) if result['people_mentioned'] else 'None'}")
     print("-" * 60)
     
-    # Pretty print full JSON
     print("\n📄 FULL JSON OUTPUT:")
     output_json = {k: v for k, v in result.items() if k not in ['file_path', 'file_name']}
     print(json.dumps(output_json, indent=2, ensure_ascii=False))
     
-    # Show model info
     print("\n🔧 MODEL INFO:")
     info = tagger.get_model_info()
     for key, value in info.items():
@@ -674,5 +673,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

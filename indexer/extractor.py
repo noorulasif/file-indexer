@@ -85,8 +85,9 @@ def extract_text(file_path: str) -> str:
         
         # Truncate if necessary
         if len(text) > MAX_TEXT_LENGTH:
+            original_len = len(text)
             text = text[:MAX_TEXT_LENGTH]
-            logger.debug(f"Truncated text from {len(text)} to {MAX_TEXT_LENGTH} chars")
+            logger.debug(f"Truncated text from {original_len} to {MAX_TEXT_LENGTH} chars")
         
         return text
         

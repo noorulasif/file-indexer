@@ -7,11 +7,14 @@ import sqlite3
 import json
 import hashlib
 import os
+
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from contextlib import contextmanager
 
+import logging
+logger = logging.getLogger(__name__)
 
 class FileDatabase:
     """
@@ -125,17 +128,10 @@ class FileDatabase:
             
             # Trigger for UPDATE
             cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS files_fts_update 
-                AFTER UPDATE ON indexed_files
-                BEGIN
-                    UPDATE files_fts 
-                    SET 
-                        file_name = new.file_name,
-                        summary = new.summary,
-                        tags = new.tags,
-                        keywords = new.keywords,
-                        document_type = new.document_type
-                    WHERE rowid = new.id;
+                CREATE TRIGGER IF NOT EXISTS files_fts_update AFTER UPDATE ON indexed_files BEGIN
+                    DELETE FROM files_fts WHERE rowid = old.id;
+                    INSERT INTO files_fts(rowid, file_name, summary, tags, keywords, document_type)
+                    VALUES (new.id, new.file_name, new.summary, new.tags, new.keywords, new.document_type);
                 END
             """)
             
@@ -308,27 +304,30 @@ class FileDatabase:
             
             # Use FTS5 with BM25 ranking
             # The MATCH query searches across all indexed columns
-            cursor.execute("""
-                SELECT 
-                    f.rowid,
-                    f.file_name,
-                    f.summary,
-                    f.document_type,
-                    f.tags,
-                    f.keywords,
-                    i.file_path,
-                    i.date_hint,
-                    i.indexed_at,
-                    i.extension,
-                    i.people_mentioned,
-                    rank               -- FTS5 relevance score (lower is better)
-                FROM files_fts f
-                JOIN indexed_files i ON f.rowid = i.id
-                WHERE files_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """, (query, limit))
-            
+            try:
+                cursor.execute("""
+                    SELECT 
+                        f.rowid,
+                        f.file_name,
+                        f.summary,
+                        f.document_type,
+                        f.tags,
+                        f.keywords,
+                        i.file_path,
+                        i.date_hint,
+                        i.indexed_at,
+                        i.extension,
+                        i.people_mentioned,
+                        rank               -- FTS5 relevance score (lower is better)
+                    FROM files_fts f
+                    JOIN indexed_files i ON f.rowid = i.id
+                    WHERE files_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, limit))
+            except sqlite3.OperationalError:
+                return []  # User typed invalid FTS5 syntax (e.g. bare quotes)
+
             results = []
             for row in cursor.fetchall():
                 # Parse JSON fields
@@ -541,8 +540,12 @@ class FileDatabase:
         Optimize the database by running VACUUM.
         Rebuilds the database file, reclaiming unused space.
         """
-        with self._get_connection() as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.isolation_level = None  # autocommit mode
             conn.execute("VACUUM")
+        finally:
+            conn.close()
     
     def optimize_fts(self) -> None:
         """
@@ -550,8 +553,6 @@ class FileDatabase:
         """
         with self._get_connection() as conn:
             conn.execute("INSERT INTO files_fts(files_fts) VALUES('optimize')")
-
-# Add this method to the FileDatabase class in database.py
 
     def clear_all(self) -> int:
         """
@@ -571,11 +572,19 @@ class FileDatabase:
             # Delete all records (FTS will be updated via triggers)
             cursor.execute("DELETE FROM indexed_files")
         
-            # Vacuum to reclaim space
-            conn.execute("VACUUM")
-        
             logger.info(f"Cleared {count} records from database")
-            return count
+
+        # Vacuum to reclaim space
+        self.vacuum()
+        return count
+
+    # Add to database.py
+    def delete_file(self, file_path: str) -> bool:
+        file_path = str(Path(file_path).absolute())
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM indexed_files WHERE file_path = ?", (file_path,))
+            return cursor.rowcount > 0
 
 def main():
     """Test the database module with sample operations."""

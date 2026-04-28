@@ -109,7 +109,7 @@ class SettingsWindow(ctk.CTkToplevel):
             # Save model settings
             self.config["model"]["model_path"] = self.model_path_var.get()
             self.config["model"]["use_gpu"] = self.gpu_var.get()
-            self.config["model"]["gpu_layers"] = self.gpu_layers_var.get()
+            self.config["model"]["gpu_layers"] = int(self.gpu_layers_var.get())
             
             # Save indexing settings
             self.config["indexing"]["max_file_size_mb"] = self.max_size_var.get()
@@ -646,7 +646,7 @@ class SearchGUI(ctk.CTk):
         self.minsize(600, 400)
         
         # Configure grid
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
         
         # Create UI elements
@@ -868,13 +868,13 @@ class SearchGUI(ctk.CTk):
     def _on_file_opened(self, file_name: str):
         """Callback when a file is opened successfully."""
         self.status_label.configure(text=f"Opened: {file_name}", text_color="#4caf50")
-        self.after(3000, lambda: self.status_label.configure(text_color=None))
+        self.after(3000, lambda: self.status_label.configure(text_color=("gray10", "gray90")))
         self.after(3000, lambda: self._update_stats())
     
     def _show_error(self, message: str):
         """Show error message in status bar."""
         self.status_label.configure(text=f"Error: {message}", text_color="#ef5350")
-        self.after(5000, lambda: self.status_label.configure(text_color=None))
+        self.after(5000, lambda: self.status_label.configure(text_color=("gray10", "gray90")))
     
     def on_closing(self):
         """Handle window close event."""

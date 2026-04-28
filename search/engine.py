@@ -128,7 +128,7 @@ class SearchEngine:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get indexer statistics.
-        
+    
         Returns:
             Dictionary containing statistics about indexed files
         """
@@ -136,94 +136,80 @@ class SearchEngine:
             'total_files': 0,
             'missing_files': 0,
             'by_type': {},
-            'last_indexed': None,
-            'total_size_mb': 0
+            'last_indexed': None
         }
-        
+    
         try:
-            # Get all files from database
-            self.database.cursor.execute("""
-                SELECT file_path, extension, indexed_at, size 
-                FROM indexed_files
-            """)
-            files = self.database.cursor.fetchall()
+            with self.database._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT file_path, extension, indexed_at
+                    FROM indexed_files
+                """)
+                files = cursor.fetchall()
             
-            stats['total_files'] = len(files)
+                stats['total_files'] = len(files)
             
-            # Count by file type and check existence
-            missing_count = 0
-            for file_path, extension, indexed_at, size in files:
-                if not os.path.exists(file_path):
-                    missing_count += 1
+                # Count by file type and check existence
+                missing_count = 0
+                for row in files:
+                    if not os.path.exists(row['file_path']):
+                        missing_count += 1
+                    ext = row['extension'].lower() if row['extension'] else 'unknown'
+                    stats['by_type'][ext] = stats['by_type'].get(ext, 0) + 1
+            
+                stats['missing_files'] = missing_count
+            
+                cursor.execute("SELECT MAX(indexed_at) FROM indexed_files")
+                last_indexed = cursor.fetchone()[0]
+                if last_indexed:
+                    stats['last_indexed'] = last_indexed
                 
-                # Count by extension
-                ext = extension.lower() if extension else 'unknown'
-                stats['by_type'][ext] = stats['by_type'].get(ext, 0) + 1
-                
-                # Track total size (if available)
-                if size:
-                    stats['total_size_mb'] += size / (1024 * 1024)
-            
-            stats['missing_files'] = missing_count
-            
-            # Get last indexed date
-            self.database.cursor.execute("""
-                SELECT MAX(indexed_at) FROM indexed_files
-            """)
-            last_indexed = self.database.cursor.fetchone()[0]
-            if last_indexed:
-                stats['last_indexed'] = last_indexed
-            
-            # Round size to 2 decimal places
-            stats['total_size_mb'] = round(stats['total_size_mb'], 2)
-            
         except Exception as e:
             print(f"Error getting stats: {e}")
-        
+    
         return stats
     
     def get_file_details(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific file.
-        
+    
         Args:
             file_path: Path to file to get details for
-            
+        
         Returns:
             Dictionary with file details or None if not found
         """
         try:
-            self.database.cursor.execute("""
-                SELECT id, file_path, file_name, extension, summary, 
-                       document_type, tags, keywords, people_mentioned, 
-                       date_hint, indexed_at, file_hash, size
-                FROM indexed_files 
-                WHERE file_path = ?
-            """, (file_path,))
+            with self.database._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, file_path, file_name, extension, summary, 
+                           document_type, tags, keywords, people_mentioned, 
+                           date_hint, indexed_at, file_hash
+                    FROM indexed_files 
+                    WHERE file_path = ?
+                """, (file_path,))
             
-            result = self.database.cursor.fetchone()
-            if not result:
-                return None
+                result = cursor.fetchone()
+                if not result:
+                    return None
             
-            # Convert to dictionary and parse JSON fields
-            columns = ['id', 'file_path', 'file_name', 'extension', 'summary',
-                      'document_type', 'tags', 'keywords', 'people_mentioned',
-                      'date_hint', 'indexed_at', 'file_hash', 'size']
+                # sqlite3.Row is already dict-like, convert directly
+                details = dict(result)
+                details['tags'] = self._parse_json_field(details.get('tags', '[]'))
+                details['keywords'] = self._parse_json_field(details.get('keywords', '[]'))
+                details['people_mentioned'] = self._parse_json_field(
+                    details.get('people_mentioned', '[]')
+                )
+                details['exists'] = os.path.exists(file_path)
             
-            details = dict(zip(columns, result))
-            details['tags'] = self._parse_json_field(details.get('tags', '[]'))
-            details['keywords'] = self._parse_json_field(details.get('keywords', '[]'))
-            details['people_mentioned'] = self._parse_json_field(
-                details.get('people_mentioned', '[]')
-            )
-            details['exists'] = os.path.exists(file_path)
-            
-            return details
+                return details
             
         except Exception as e:
             print(f"Error getting file details: {e}")
             return None
     
-    def _parse_json_field(self, json_str: str) -> List[str]:
+    def _parse_json_field(self, json_str) -> list:
         """Parse JSON string field to Python list.
         
         Args:
@@ -232,18 +218,19 @@ class SearchEngine:
         Returns:
             Python list, empty list if parsing fails
         """
+        if isinstance(json_str, list):
+            return json_str
         if not json_str or json_str == 'null':
             return []
-        
         try:
             parsed = json.loads(json_str)
             return parsed if isinstance(parsed, list) else []
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return []
     
     def close(self):
         """Close database connection."""
-        self.database.close()
+        pass
     
     def __enter__(self):
         """Context manager entry."""

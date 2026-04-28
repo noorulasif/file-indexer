@@ -36,13 +36,13 @@ class SearchCLI:
             query: Optional search query from command line
         """
         try:
+            self.console.print("\n[bold cyan]🔍 File Indexer Search[/bold cyan]")
             while True:
                 # Get search query
                 if query:
                     search_term = query
                     query = None  # Only use once
                 else:
-                    self.console.print("\n[bold cyan]🔍 File Indexer Search[/bold cyan]")
                     self.console.print("[dim]Press Ctrl+C or type 'quit' to exit[/dim]\n")
                     search_term = Prompt.ask("Enter search query")
                 
@@ -72,7 +72,6 @@ class SearchCLI:
 [cyan]Total files indexed:[/cyan] {stats['total_files']:,}
 [cyan]Missing files:[/cyan] {stats['missing_files']:,}
 [cyan]Files existing:[/cyan] {stats['total_files'] - stats['missing_files']:,}
-[cyan]Total size:[/cyan] {stats['total_size_mb']} MB
 
 [cyan]Last indexed:[/cyan] {stats['last_indexed'] or 'Never'}
 
@@ -135,7 +134,7 @@ class SearchCLI:
                 f"[{name_style}]{status_icon} {result['file_name']}[/{name_style}]",
                 file_type,
                 summary,
-                str(date_hint)[:10],
+                str(date_hint),
                 f"[dim]{path_display}[/dim]"
             )
         
@@ -149,54 +148,6 @@ class SearchCLI:
         # Ask about opening a file
         self._prompt_open_file(results)
 
-    def _display_results_for_query(self, query: str, results: List[dict]):
-        """Display results for a single query (non-interactive mode).
-    
-        Args:
-            query: Search query string
-            results: List of search results
-        """
-        table = Table(title=f"Search Results: '{query}'", box=box.ROUNDED)
-        table.add_column("#", style="dim", width=4)
-        table.add_column("File Name", style="bold", width=50)
-        table.add_column("Type", width=10)
-        table.add_column("Summary", width=60)
-        table.add_column("Date", width=12)
-    
-        for idx, result in enumerate(results, 1):
-            # Determine color based on file existence
-            if result['exists']:
-                name_style = "green"
-                status_icon = "✓"
-            else:
-                name_style = "red"
-                status_icon = "✗"
-        
-            # Truncate summary to 60 chars
-            summary = result.get('summary', 'No summary')[:57] + "..." if len(result.get('summary', '')) > 60 else result.get('summary', 'No summary')
-        
-            # Format date
-            date_hint = result.get('date_hint') or result.get('indexed_at', '')[:10] or 'Unknown'
-        
-            # Get file type (extension)
-            file_type = result.get('extension', 'unknown').upper()
-        
-            table.add_row(
-                f"{idx}",
-                f"[{name_style}]{status_icon} {result['file_name']}[/{name_style}]",
-                file_type,
-                summary,
-                str(date_hint)[:10]
-            )
-    
-        self.console.print(table)
-    
-        # Add note about missing files if any
-        missing_count = sum(1 for r in results if not r['exists'])
-        if missing_count > 0:
-            self.console.print(f"\n[yellow]⚠ {missing_count} file(s) marked in red are missing from disk[/yellow]")
-
-    
     def _prompt_open_file(self, results: List[dict]):
         """Prompt user to open a file from results.
         
@@ -257,12 +208,7 @@ def main():
         cli.show_stats()
     elif args.query:
         # Single search mode - one query then exit
-        results = cli.engine.search(args.query)
-        if results:
-            cli._display_results_for_query(args.query, results)
-            cli._prompt_open_file(results)
-        else:
-            cli.console.print(f"\n[yellow]No results found for '{args.query}'[/yellow]")
+        cli._display_results(args.query)
         cli.engine.close()
     else:
         # Interactive mode

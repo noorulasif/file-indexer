@@ -72,7 +72,7 @@ class DebouncedEventHandler(FileSystemEventHandler):
         # Check file size
         try:
             file_size = path.stat().st_size
-            if file_size > self.max_file_size_bytes:
+            if (file_size < 10) or (file_size > self.max_file_size_bytes):
                 return False
         except (OSError, FileNotFoundError):
             # File might not exist yet or be inaccessible

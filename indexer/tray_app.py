@@ -1,12 +1,21 @@
 """
 System tray application for the File Indexer.
 Provides a GUI interface to control the indexing service.
+
+Linux note: requires a system tray host. Install one of:
+  - GNOME: gnome-shell-extension-appindicator
+  - KDE:   built-in
+  - Other: snixembed or stalonetray
+
+Install Python deps:
+  pip install pystray Pillow
 """
 
 import sys
 import threading
 import subprocess
 import time
+import logging
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -20,569 +29,304 @@ except ImportError:
 
 from .orchestrator import FileIndexerOrchestrator
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Icon factory — shared by both entry points
+# ---------------------------------------------------------------------------
+
+def _create_icon_image() -> Image.Image:
+    """
+    Create a programmatic 64x64 tray icon: blue square with a white 'F'.
+    No external image file needed.
+    """
+    size = 64
+    image = Image.new("RGB", (size, size), color=(33, 150, 243))  # Material blue
+    draw = ImageDraw.Draw(image)
+
+    # Try bold system fonts; fall back to PIL default
+    font = None
+    font_candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",  # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",          # Linux alt
+        "arialbd.ttf",                                                    # Windows bold
+        "arial.ttf",                                                      # Windows
+    ]
+    for path in font_candidates:
+        try:
+            font = ImageFont.truetype(path, 40)
+            break
+        except (IOError, OSError):
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), "F", font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x = (size - text_w) // 2
+    y = (size - text_h) // 2 - 2
+
+    draw.text((x, y), "F", fill=(255, 255, 255), font=font)
+    return image
+
+
+# ---------------------------------------------------------------------------
+# TrayApp
+# ---------------------------------------------------------------------------
 
 class TrayApp:
     """
-    System tray application that manages the file indexer.
+    System tray application that manages the File Indexer.
+
+    Accepts a pre-initialised FileIndexerOrchestrator so that
+    run_indexer.py controls the lifecycle; the tray just drives it.
     """
-    
-    def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize the tray application.
-        
-        Args:
-            config_path: Optional path to configuration file
-        """
-        self.config_path = config_path
-        self.orchestrator: Optional[FileIndexerOrchestrator] = None
-        self.orchestrator_thread: Optional[threading.Thread] = None
+
+    def __init__(self, orchestrator: FileIndexerOrchestrator):
+        self.orchestrator = orchestrator
         self.is_paused = False
         self.icon: Optional[pystray.Icon] = None
-        self.menu_items = {}
-        
-        # Create the icon
-        self.icon_image = self._create_icon_image()
-        
-        # Build the menu
-        self._build_menu()
-        
-        # Set up status update timer
-        self.status_update_timer = None
-    
-    def _create_icon_image(self) -> Image.Image:
-        """
-        Create a programmatic icon image with the letter 'F'.
-        
-        Returns:
-            PIL Image object
-        """
-        # Create a 64x64 image with a dark blue background
-        size = 64
-        image = Image.new('RGB', (size, size), color=(33, 150, 243))  # Material blue
-        
-        # Get drawing context
-        draw = ImageDraw.Draw(image)
-        
-        # Try to load a font, fall back to default if not available
-        try:
-            # Try to use a larger system font
-            font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 40)
-        except (IOError, OSError):
-            try:
-                # Windows font
-                font = ImageFont.truetype("arial.ttf", 40)
-            except (IOError, OSError):
-                # Default font
-                font = ImageFont.load_default()
-        
-        # Draw the letter 'F' in white
-        # Get text bounding box
-        bbox = draw.textbbox((0, 0), "F", font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        # Center the text
-        x = (size - text_width) // 2
-        y = (size - text_height) // 2 - 5  # Slight adjustment
-        
-        draw.text((x, y), "F", fill=(255, 255, 255), font=font)
-        
-        return image
-    
-    def _build_menu(self) -> None:
-        """
-        Build the system tray menu structure.
-        """
-        # Create menu items
-        self.menu_items = {
-            "title": pystray.MenuItem(
-                "File Indexer",
-                None,
-                enabled=False  # Grayed out / not clickable
-            ),
-            "separator1": pystray.Menu.SEPARATOR,
-            "status": pystray.MenuItem(
-                "Status: Initializing...",
-                None,
-                enabled=False
-            ),
-            "separator2": pystray.Menu.SEPARATOR,
-            "pause_resume": pystray.MenuItem(
-                "Pause Indexing",
-                self._toggle_pause,
-                enabled=True
-            ),
-            "separator3": pystray.Menu.SEPARATOR,
-            "open_search": pystray.MenuItem(
-                "Open Search App",
-                self._open_search_app,
-                enabled=True
-            ),
-            "view_stats": pystray.MenuItem(
-                "View Stats",
-                self._show_stats,
-                enabled=True
-            ),
-            "separator4": pystray.Menu.SEPARATOR,
-            "quit": pystray.MenuItem(
-                "Quit",
-                self._quit_app,
-                enabled=True
-            )
-        }
-        
-        # Create the menu
-        menu_items = list(self.menu_items.values())
-        self.menu = pystray.Menu(*menu_items)
-    
-    def _update_menu_status(self) -> None:
-        """
-        Update the status text in the menu.
-        """
-        if self.icon:
-            # Update status text
-            if not self.orchestrator or not self.orchestrator.is_running:
-                status_text = "Status: Stopped"
-            elif self.is_paused:
-                status_text = "Status: Paused"
-            else:
-                status_text = "Status: Running"
-            
-            # Update the menu item
-            self.menu_items["status"].text = status_text
-            
-            # Update pause/resume button text
-            if self.is_paused:
-                self.menu_items["pause_resume"].text = "Resume Indexing"
-            else:
-                self.menu_items["pause_resume"].text = "Pause Indexing"
-            
-            # Refresh the menu
-            self.icon.update_menu()
-    
+
+        # Event used to stop the status-polling thread cleanly
+        self._stop_event = threading.Event()
+
+        # Give the orchestrator a back-channel to show notifications
+        orchestrator.show_notification = self._show_notification
+
+        self.icon_image = _create_icon_image()
+        self.menu = self._build_menu()
+
+    # ------------------------------------------------------------------
+    # Menu construction
+    # ------------------------------------------------------------------
+
+    def _build_menu(self) -> pystray.Menu:
+        """Build the right-click menu with dynamic items."""
+
+        # Dynamic items need to be callables so pystray re-evaluates them
+        # each time the menu is shown.
+
+        def status_text(item):
+            if not self.orchestrator.is_running:
+                return "Status: Stopped"
+            return "Status: Paused" if self.is_paused else "Status: Running"
+
+        def pause_resume_text(item):
+            return "Resume Indexing" if self.is_paused else "Pause Indexing"
+
+        return pystray.Menu(
+            pystray.MenuItem("File Indexer", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(status_text, None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(pause_resume_text, self._toggle_pause),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open Search App", self._open_search_app),
+            pystray.MenuItem("View Stats",      self._show_stats),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit",            self._quit_app),
+        )
+
+    # ------------------------------------------------------------------
+    # Menu callbacks
+    # ------------------------------------------------------------------
+
     def _toggle_pause(self) -> None:
         """
-        Toggle the indexing pause state.
+        Pause or resume indexing.
+
+        Rather than stopping/restarting the watchdog observer (which
+        watchdog does not support), we flip a flag on the orchestrator.
+        The orchestrator's _watcher_callback already checks is_paused
+        and skips processing when True.
         """
         self.is_paused = not self.is_paused
-        
-        if self.orchestrator:
-            if self.is_paused:
-                # Stop the watcher when pausing
-                if self.orchestrator.watcher:
-                    self.orchestrator.watcher.stop()
-                print("[Tray] Indexing paused")
-            else:
-                # Restart the watcher when resuming
-                if self.orchestrator.watcher and self.orchestrator.is_running:
-                    self.orchestrator.watcher.start()
-                print("[Tray] Indexing resumed")
-        
-        self._update_menu_status()
-        
-        # Show notification
-        self._show_notification(
-            "File Indexer",
-            f"Indexing {'paused' if self.is_paused else 'resumed'}"
-        )
-    
+        self.orchestrator.is_paused = self.is_paused
+
+        state = "paused" if self.is_paused else "resumed"
+        logger.info(f"[Tray] Indexing {state}")
+        self._show_notification("File Indexer", f"Indexing {state}")
+
+        if self.icon:
+            self.icon.update_menu()
+
     def _open_search_app(self) -> None:
-        """
-        Launch the search application as a subprocess.
-        """
+        """Launch run_search.py as a detached subprocess."""
         try:
-            # Find the search script path
-            project_root = Path(__file__).parent.parent
-            search_script = project_root / "run_search.py"
-            
+            search_script = Path(__file__).parent.parent / "run_search.py"
+
             if not search_script.exists():
-                self._show_notification(
-                    "File Indexer",
-                    "Search app not found!",
-                    critical=True
-                )
+                self._show_notification("File Indexer", "Search app not found!")
+                logger.warning(f"[Tray] run_search.py not found at {search_script}")
                 return
-            
-            # Launch the search app
+
             if sys.platform == "win32":
                 subprocess.Popen(
                     [sys.executable, str(search_script)],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             else:
                 subprocess.Popen(
                     [sys.executable, str(search_script)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
                 )
-            
-            print("[Tray] Launched search app")
-            
+
+            logger.info("[Tray] Launched search app")
+
         except Exception as e:
-            print(f"[Tray] Error launching search app: {e}")
-            self._show_notification(
-                "File Indexer",
-                f"Error launching search app: {e}",
-                critical=True
-            )
-    
+            logger.error(f"[Tray] Error launching search app: {e}")
+            self._show_notification("File Indexer", f"Could not open search app: {e}")
+
     def _show_stats(self) -> None:
-        """
-        Show statistics in a popup notification.
-        """
-        if not self.orchestrator or not self.orchestrator.db:
-            self._show_notification(
-                "File Indexer",
-                "Indexer not initialized"
-            )
-            return
-        
+        """Show a stats summary via system notification."""
         try:
-            # Get database stats
-            stats = self.orchestrator.db.get_all_stats()
-            
-            # Format the stats message
-            message = f"Total Files: {stats['total_files']}\n"
-            message += f"Document Types: {len(stats['by_document_type'])}\n"
-            
-            # Add top 3 document types
-            if stats['by_document_type']:
-                top_types = list(stats['by_document_type'].items())[:3]
-                message += "\nTop Types:\n"
-                for doc_type, count in top_types:
-                    message += f"  {doc_type}: {count}\n"
-            
-            # Add last indexed time
-            if stats['last_indexed']:
+            db_stats = self.orchestrator.db.get_all_stats()
+
+            last = db_stats.get("last_indexed") or "Never"
+            if last != "Never":
                 try:
-                    last_time = datetime.fromisoformat(stats['last_indexed'])
-                    message += f"\nLast Indexed:\n{last_time.strftime('%Y-%m-%d %H:%M:%S')}"
-                except:
-                    message += f"\nLast Indexed: {stats['last_indexed']}"
-            else:
-                message += "\nLast Indexed: Never"
-            
-            # Add runtime stats
-            if self.orchestrator.stats:
-                message += f"\n\nSession Stats:\n"
-                message += f"  Indexed: {self.orchestrator.stats['processed']}\n"
-                message += f"  Failed: {self.orchestrator.stats['failed']}"
-            
-            self._show_notification("File Indexer Stats", message)
-            
+                    last = datetime.fromisoformat(last).strftime("%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+
+            lines = [
+                f"Total files:  {db_stats['total_files']}",
+                f"Last indexed: {last}",
+            ]
+
+            # Top 3 document types
+            by_type = db_stats.get("by_document_type", {})
+            if by_type:
+                lines.append("Top types:")
+                for doc_type, count in list(by_type.items())[:3]:
+                    lines.append(f"  {doc_type}: {count}")
+
+            # Session stats
+            sess = self.orchestrator.stats
+            if sess.get("processed", 0) > 0:
+                lines.append(f"Session: {sess['processed']} indexed, {sess['failed']} failed")
+
+            self._show_notification("File Indexer Stats", "\n".join(lines))
+
         except Exception as e:
-            print(f"[Tray] Error getting stats: {e}")
-            self._show_notification(
-                "File Indexer",
-                f"Error retrieving stats: {e}",
-                critical=True
-            )
-    
-    def _show_notification(self, title: str, message: str, critical: bool = False) -> None:
-        """
-        Show a system notification.
-        
-        Args:
-            title: Notification title
-            message: Notification message
-            critical: Whether this is a critical notification
-        """
-        if not self.icon:
-            return
-        
-        try:
-            # Use pystray's notification system
-            self.icon.notify(message, title)
-        except Exception as e:
-            # Fallback to print
-            print(f"[Notification] {title}: {message}")
-    
-    def _run_orchestrator(self) -> None:
-        """
-        Run the orchestrator in a background thread.
-        """
-        try:
-            # Initialize orchestrator
-            self.orchestrator = FileIndexerOrchestrator(config_path=self.config_path)
-            
-            # Start the orchestrator
-            self.orchestrator.start()
-            
-        except Exception as e:
-            print(f"[Tray] Orchestrator error: {e}")
-            self._show_notification(
-                "File Indexer Error",
-                f"Orchestrator failed: {e}",
-                critical=True
-            )
-    
-    def _update_status_periodically(self) -> None:
-        """
-        Periodically update the menu status.
-        """
-        def update_loop():
-            while self.icon and self.icon._running:
-                time.sleep(2)  # Update every 2 seconds
-                if self.icon and self.icon._running:
-                    self._update_menu_status()
-        
-        # Start in background thread
-        thread = threading.Thread(target=update_loop, daemon=True)
-        thread.start()
-    
+            logger.error(f"[Tray] Error getting stats: {e}")
+            self._show_notification("File Indexer", f"Could not retrieve stats: {e}")
+
+    def _show_notification(self, title: str, message: str, **kwargs) -> None:
+        """Show a system notification via the tray icon (fallback: log)."""
+        if self.icon:
+            try:
+                self.icon.notify(message, title)
+                return
+            except Exception:
+                pass
+        # Fallback when icon isn't ready yet or notify isn't supported
+        logger.info(f"[Notification] {title}: {message}")
+
     def _quit_app(self) -> None:
-        """
-        Quit the application cleanly.
-        """
-        print("[Tray] Shutting down...")
-        
-        # Stop orchestrator
+        """Stop the orchestrator and exit cleanly."""
+        logger.info("[Tray] Shutting down...")
+        self._stop_event.set()          # Stop the status-poll thread
+
         if self.orchestrator:
             self.orchestrator.stop()
-        
-        # Stop the status update thread
-        if self.status_update_timer:
-            self.status_update_timer.cancel()
-        
-        # Stop the icon
+
         if self.icon:
-            self.icon.stop()
-        
-        print("[Tray] Goodbye!")
-        sys.exit(0)
-    
+            self.icon.stop()            # Let icon.run() return naturally
+        # Do NOT call sys.exit() here — it prevents icon cleanup on Linux
+
+    # ------------------------------------------------------------------
+    # Background status polling
+    # ------------------------------------------------------------------
+
+    def _status_poll_loop(self) -> None:
+        """
+        Runs in a daemon thread.
+        Calls icon.update_menu() every 5 seconds so the dynamic status
+        text stays current without any private pystray internals.
+        """
+        while not self._stop_event.wait(timeout=5):
+            if self.icon:
+                try:
+                    self.icon.update_menu()
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+
     def run(self) -> None:
         """
-        Run the system tray application.
+        Start the orchestrator (if not already running), create the tray
+        icon, and block until the user clicks Quit.
         """
-        # Create the icon
+        # Start the orchestrator in a background thread if needed
+        if not self.orchestrator.is_running:
+            t = threading.Thread(target=self.orchestrator.start, daemon=True)
+            t.start()
+
+        # Start the status-polling thread
+        poll_thread = threading.Thread(target=self._status_poll_loop, daemon=True)
+        poll_thread.start()
+
+        # Create and run the icon (blocks until icon.stop() is called)
         self.icon = pystray.Icon(
             "file_indexer",
             self.icon_image,
             "File Indexer",
-            self.menu
+            self.menu,
         )
-        
-        # Start orchestrator in background thread
-        orchestrator_thread = threading.Thread(target=self._run_orchestrator, daemon=True)
-        orchestrator_thread.start()
-        
-        # Wait for orchestrator to initialize
-        time.sleep(3)
-        
-        # Start periodic status updates
-        self._update_status_periodically()
-        
-        # Update initial status
-        self._update_menu_status()
-        
-        # Show startup notification
-        self._show_notification(
-            "File Indexer",
-            "Indexer started and running in background"
-        )
-        
-        # Run the icon (blocks until quit)
-        print("[Tray] File Indexer running in system tray")
-        print("[Tray] Right-click the icon to access menu")
-        print("[Tray] Press Ctrl+C in terminal to quit")
-        
+
+        logger.info("[Tray] File Indexer running in system tray")
+        logger.info("[Tray] Right-click the tray icon to access controls")
+
         try:
             self.icon.run()
         except KeyboardInterrupt:
             self._quit_app()
+
+
+# ---------------------------------------------------------------------------
+# Public entry points called by run_indexer.py
+# ---------------------------------------------------------------------------
+
+def run_tray_app_with_orchestrator(orchestrator: FileIndexerOrchestrator) -> None:
+    """
+    Run the tray application with a pre-initialised orchestrator.
+    Called by run_indexer.py when --no-tray is NOT set.
+    """
+    app = TrayApp(orchestrator)
+    app.run()
 
 
 def run_tray_app(config_path: Optional[str] = None) -> None:
     """
-    Run the tray application.
-    
-    Args:
-        config_path: Optional path to configuration file
+    Convenience entry point: create an orchestrator internally and run.
+    Useful when launching tray_app.py directly.
     """
-    app = TrayApp(config_path=config_path)
-    app.run()
-
-def run_tray_app_with_orchestrator(orchestrator):
-    """
-    Run the tray application with a pre-initialized orchestrator.
-    
-    Args:
-        orchestrator: Initialized FileIndexerOrchestrator instance
-    """
-    app = TrayAppWithOrchestrator(orchestrator)
+    orchestrator = FileIndexerOrchestrator(config_path=config_path)
+    app = TrayApp(orchestrator)
     app.run()
 
 
-class TrayAppWithOrchestrator:
-    """
-    Tray application that uses a pre-initialized orchestrator.
-    """
-    
-    def __init__(self, orchestrator):
-        self.orchestrator = orchestrator
-        self.is_paused = False
-        self.icon = None
-        self.menu_items = {}
-        
-        # Create the icon
-        from PIL import Image, ImageDraw, ImageFont
-        self.icon_image = self._create_icon_image()
-        
-        # Build the menu
-        self._build_menu()
-        
-        # Give orchestrator a reference to show notifications
-        orchestrator.show_notification = self._show_notification
-    
-    def _create_icon_image(self):
-        """Create the tray icon image."""
-        from PIL import Image, ImageDraw, ImageFont
-        
-        size = 64
-        image = Image.new('RGB', (size, size), color=(33, 150, 243))
-        draw = ImageDraw.Draw(image)
-        
-        try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 40)
-        except:
-            try:
-                font = ImageFont.truetype("arial.ttf", 40)
-            except:
-                font = ImageFont.load_default()
-        
-        bbox = draw.textbbox((0, 0), "F", font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        x = (size - text_width) // 2
-        y = (size - text_height) // 2 - 5
-        
-        draw.text((x, y), "F", fill=(255, 255, 255), font=font)
-        return image
-    
-    def _build_menu(self):
-        """Build the system tray menu."""
-        import pystray
-        
-        self.menu_items = {
-            "title": pystray.MenuItem("File Indexer", None, enabled=False),
-            "separator1": pystray.Menu.SEPARATOR,
-            "status": pystray.MenuItem("Status: Running", None, enabled=False),
-            "separator2": pystray.Menu.SEPARATOR,
-            "pause_resume": pystray.MenuItem("Pause Indexing", self._toggle_pause),
-            "separator3": pystray.Menu.SEPARATOR,
-            "open_search": pystray.MenuItem("Open Search App", self._open_search_app),
-            "view_stats": pystray.MenuItem("View Stats", self._show_stats),
-            "separator4": pystray.Menu.SEPARATOR,
-            "quit": pystray.MenuItem("Quit", self._quit_app)
-        }
-        
-        self.menu = pystray.Menu(*self.menu_items.values())
-    
-    def _toggle_pause(self):
-        """Toggle indexing pause state."""
-        self.is_paused = not self.is_paused
-        
-        if self.is_paused:
-            if self.orchestrator.watcher:
-                self.orchestrator.watcher.stop()
-            self.menu_items["pause_resume"].text = "Resume Indexing"
-            self.menu_items["status"].text = "Status: Paused"
-        else:
-            if self.orchestrator.watcher and self.orchestrator.is_running:
-                self.orchestrator.watcher.start()
-            self.menu_items["pause_resume"].text = "Pause Indexing"
-            self.menu_items["status"].text = "Status: Running"
-        
-        if self.icon:
-            self.icon.update_menu()
-        self._show_notification("File Indexer", f"Indexing {'paused' if self.is_paused else 'resumed'}")
-    
-    def _open_search_app(self):
-        """Launch the search application."""
-        import subprocess
-        
-        try:
-            project_root = Path(__file__).parent.parent
-            search_script = project_root / "run_search.py"
-            
-            if not search_script.exists():
-                self._show_notification("File Indexer", "Search app not found!", critical=True)
-                return
-            
-            if sys.platform == "win32":
-                subprocess.Popen([sys.executable, str(search_script)], creationflags=subprocess.CREATE_NEW_CONSOLE)
-            else:
-                subprocess.Popen([sys.executable, str(search_script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-        except Exception as e:
-            self._show_notification("File Indexer", f"Error launching search app: {e}", critical=True)
-    
-    def _show_stats(self):
-        """Show statistics in a notification."""
-        try:
-            stats = self.orchestrator.get_detailed_stats()
-            db_stats = stats['database']
-            
-            message = f"Total Files: {db_stats['total_files']}\n"
-            message += f"Document Types: {len(db_stats['by_document_type'])}\n"
-            message += f"Last Indexed: {db_stats['last_indexed'][:10] if db_stats['last_indexed'] else 'Never'}\n"
-            message += f"Session: {self.orchestrator.stats['processed']} indexed, {self.orchestrator.stats['failed']} failed"
-            
-            self._show_notification("File Indexer Stats", message)
-            
-        except Exception as e:
-            self._show_notification("File Indexer", f"Error getting stats: {e}", critical=True)
-    
-    def _show_notification(self, title, message, critical=False):
-        """Show a system notification."""
-        if self.icon:
-            try:
-                self.icon.notify(message, title)
-            except:
-                print(f"[Notification] {title}: {message}")
-    
-    def _quit_app(self):
-        """Quit the application."""
-        if self.orchestrator:
-            self.orchestrator.stop()
-        if self.icon:
-            self.icon.stop()
-        sys.exit(0)
-    
-    def run(self):
-        """Run the tray application."""
-        import pystray
-        
-        self.icon = pystray.Icon("file_indexer", self.icon_image, "File Indexer", self.menu)
-        
-        # Start orchestrator if not already running
-        if not self.orchestrator.is_running:
-            import threading
-            thread = threading.Thread(target=self.orchestrator.start, daemon=True)
-            thread.start()
-        
-        self._show_notification("File Indexer", "Indexer running in system tray")
-        
-        try:
-            self.icon.run()
-        except KeyboardInterrupt:
-            self._quit_app()
+# ---------------------------------------------------------------------------
+# Direct invocation
+# ---------------------------------------------------------------------------
 
 def main():
-    """Main entry point for the tray app."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="File Indexer System Tray App")
+    parser = argparse.ArgumentParser(description="File Indexer System Tray")
     parser.add_argument("--config", "-c", help="Path to configuration file")
-    
     args = parser.parse_args()
-    
     run_tray_app(config_path=args.config)
 
 
 if __name__ == "__main__":
     main()
+
 
 

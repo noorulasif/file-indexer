@@ -328,15 +328,13 @@ def main():
         logger.debug("Verbose logging enabled")
     
     # Handle maintenance commands that don't need full initialization
-    if args.stats and not args.config:
+    if args.stats:
         # For stats, we can initialize just the database
         try:
             from indexer.config_loader import load_config
             from indexer.database import FileDatabase
-            
-            config = load_config()
-            if args.config:
-                config = load_config(args.config)
+
+            config = load_config(args.config) if args.config else load_config()
             
             db = FileDatabase(config['database_path'])
             stats = db.get_all_stats()
